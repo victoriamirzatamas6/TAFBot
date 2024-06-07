@@ -1,2 +1,2 @@
 # TAFBot
-Implementation of ChatBot using LamgChain
+ChatBot implementation using Langchain
