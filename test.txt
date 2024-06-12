@@ -1,0 +1,35 @@
+import asyncio
+from threading import Thread
+from localllama3 import initialize_chain
+from typing import List
+from pydantic import BaseModel
+import langchain
+
+langchain.verbose = False
+
+chain, memory, streamer = initialize_chain()
+
+async def main():
+    while True:
+        query = input("Enter your query: ")
+        
+        # Function to invoke the chain in a thread
+        def run_chain_in_thread():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(chain.ainvoke(query))
+            return result
+        
+        thread = Thread(target=run_chain_in_thread)
+        thread.start()
+        
+        fulltext = ''
+        # Printing the streamer output synchronously
+        for text in streamer:
+            fulltext += text
+        
+        print(fulltext)
+    
+
+if __name__ == "__main__":
+    asyncio.run(main())

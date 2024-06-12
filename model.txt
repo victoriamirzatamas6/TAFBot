@@ -1,0 +1,82 @@
+from indexing import load_vector_store
+from langchain.memory import ConversationBufferWindowMemory
+from langchain.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+from langchain_community.llms.huggingface_pipeline import HuggingFacePipeline
+from operator import itemgetter
+import os
+from pydantic import BaseModel
+import torch
+from transformers import AutoTokenizer, BitsAndBytesConfig, TextIteratorStreamer
+from huggingface_hub import login
+
+HF_TOKEN = os.environ.get('HF_TOKEN')
+login(token = HF_TOKEN, add_to_git_credential=True, new_session=False)
+
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+class Query(BaseModel):
+    content: str
+
+class Answer(BaseModel):
+    content: str
+
+def initialize_chain():
+
+    model_id = 'meta-llama/Meta-Llama-3-8B-Instruct'
+    bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4")
+    stop_list = ['<|start_header_id|>', '<|eot_id|>', '<|begin_of_text|>']
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=model_id)
+    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens = True)
+
+    # using from-model id
+    hf_pipe = HuggingFacePipeline.from_model_id(
+        model_id = model_id,
+        task = "text-generation",
+        device_map = "auto",
+        model_kwargs = {"quantization_config" : bnb_config},
+        pipeline_kwargs = { "max_new_tokens" : 1024,
+                           "streamer" : streamer}
+    )
+
+    template = """<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+You are an expert, created to answer questions related only to the use of the "UWB Tuning Tool" app, software for tuning & configuration of UWB antennas at Continental,
+You are truthful and provide only relevant information that adheres strictly to the context provided. You don't add or make up any extra information or examples. 
+If you don't have any context or don't know how to answer a question, apologize and await a different question.
+The user you are communicating with shouldn't be told about the context.
+<|start_header_id|>context<|end_header_id|>
+{context}<|eot_id|>
+
+{chat_history}
+<|start_header_id|>user<|end_header_id|>
+{question}<|eot_id|><|start_header_id|>assistant<|end_header_id|>""" 
+
+
+    QA_CHAIN_PROMPT = PromptTemplate.from_template(template=template)
+
+    vector_store = load_vector_store()
+
+    #define retriever
+    retriever = vector_store.as_retriever(search_type="similarity_score_threshold",
+                                        search_kwargs={'score_threshold': 0.5})
+
+    #define memory
+    memory = ConversationBufferWindowMemory(
+        output_key="answer",
+        input_key="question",
+        human_prefix="<|start_header_id|>user<|end_header_id|>",
+        ai_prefix="<|start_header_id|>assistant<|end_header_id|>",
+        k = 10
+    )
+
+    #step to load memory
+    chain = (
+        {"context": retriever, 
+        "question": RunnablePassthrough(),
+        "chat_history": RunnableLambda(memory.load_memory_variables) | itemgetter("history")}
+        | QA_CHAIN_PROMPT
+        | hf_pipe.bind(stop = stop_list)
+    )
+
+    return chain, memory, streamer
